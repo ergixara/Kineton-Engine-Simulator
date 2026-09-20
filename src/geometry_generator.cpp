@@ -36,6 +36,14 @@ void GeometryGenerator::reset() {
     m_state.subshapeVertexPointer = 0;
 }
 
+bool GeometryGenerator::generateTriangle3d(const dbasic::Vertex &a, const dbasic::Vertex &b, const dbasic::Vertex &c) {
+    startSubshape();
+    if (!checkCapacity(3, 3) || m_state.subshapeVertexPointer > 65532) return false;
+    *writeVertex() = a; *writeVertex() = b; *writeVertex() = c;
+    writeFace(0, 1, 2);
+    return true;
+}
+
 bool GeometryGenerator::generateFilledCircle(
     const ysVector &normal,
     const ysVector &center,

@@ -12,6 +12,18 @@ Shaders::Shaders() {
 
     m_screenVariables.FogNear = m_uiScreenVariables.FogNear = 16000.0f;
     m_screenVariables.FogFar = m_uiScreenVariables.FogFar = 16001.0f;
+
+    m_lightingControls.AmbientLighting = ysMath::LoadVector(0.32f, 0.36f, 0.44f, 1.0f);
+    const ysVector positions[] = {ysMath::LoadVector(-3, 5, 4, 1),
+        ysMath::LoadVector(4, 1, 2, 1), ysMath::LoadVector(0, 3, -4, 1)};
+    const ysVector colors[] = {ysMath::LoadVector(0.9f, 0.94f, 1, 1),
+        ysMath::LoadVector(0.38f, 0.48f, 0.65f, 1), ysMath::LoadVector(0.7f, 0.47f, 0.26f, 1)};
+    for (int i = 0; i < 3; ++i) {
+        auto &light = m_lightingControls.Lights[i];
+        light.Active = 1; light.FalloffEnabled = 0;
+        light.Attenuation0 = light.Attenuation1 = -1;
+        light.Position = positions[i]; light.Color = colors[i];
+    }
 }
 
 Shaders::~Shaders() {
@@ -176,6 +188,16 @@ void Shaders::CalculateUiCamera(float screenWidth, float screenHeight) {
     m_uiScreenVariables.CameraView =
         ysMath::Transpose(ysMath::CameraTarget(cameraEye, cameraTarget, up));
     m_uiScreenVariables.Eye = ysMath::LoadVector(cameraEye);
+}
+
+void Shaders::CalculateCamera3d(float aspect, const ysVector &target, float distance, float yaw, float pitch) {
+    const ysVector eye = ysMath::Add(target, ysMath::LoadVector(
+        distance*std::sin(yaw)*std::cos(pitch), distance*std::sin(pitch),
+        distance*std::cos(yaw)*std::cos(pitch), 0));
+    m_screenVariables.Projection = ysMath::Transpose(ysMath::FrustrumPerspective(
+        ysMath::Constants::PI / 4, aspect, std::fmax(0.0001f, distance*0.005f), distance*10 + 10));
+    m_screenVariables.CameraView = ysMath::Transpose(ysMath::CameraTarget(eye, target, ysMath::Constants::YAxis));
+    m_screenVariables.Eye = eye;
 }
 
 void Shaders::SetClearColor(const ysVector &col) {

@@ -39,7 +39,7 @@ void CrankshaftObject::render(const ViewParameters *view) {
             (float)m_crankshaft->getRodJournalAngle(i));
 
         m_app->getShaders()->SetBaseColor(col);
-        m_app->getEngine()->DrawModel(
+        m_app->drawModel2d(
             m_app->getShaders()->GetRegularFlags(),
             m_app->getAssetManager()->GetModelAsset("Crankshaft"),
             0x32 - layer);
@@ -52,13 +52,13 @@ void CrankshaftObject::render(const ViewParameters *view) {
         0.0f,
         0.0f);
     m_app->getShaders()->SetBaseColor(grey1);
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("CrankSnout"),
         0x32);
 
     m_app->getShaders()->SetBaseColor(grey2);
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("CrankSnoutThreads"),
         0x32);

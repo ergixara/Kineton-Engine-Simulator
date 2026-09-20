@@ -130,6 +130,8 @@ public:
 
     void reset();
 
+    bool generateTriangle3d(const dbasic::Vertex &a, const dbasic::Vertex &b, const dbasic::Vertex &c);
+
     bool generateFilledCircle(
         const ysVector &normal,
         const ysVector &center,

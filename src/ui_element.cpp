@@ -82,7 +82,7 @@ void UiElement::onMouseScroll(int mouseScroll) {
 }
 
 UiElement *UiElement::mouseOver(const Point &mouseLocal) {
-    if (m_disabled) return nullptr;
+    if (m_disabled || !m_visible) return nullptr;
 
     const int n = (int)getChildCount();
     for (int i = n - 1; i >= 0; --i) {
@@ -191,7 +191,7 @@ void UiElement::drawModel(
     );
 
     m_app->getShaders()->SetBaseColor(color);
-    m_app->getEngine()->DrawModel(m_app->getShaders()->GetUiFlags(), model, 0x11);
+    m_app->drawModel2d(m_app->getShaders()->GetUiFlags(), model, 0x11);
 }
 
 void UiElement::drawFrame(

@@ -13,12 +13,15 @@
 #include "../include/exhaust_system.h"
 #include "../include/feedback_comb_filter.h"
 #include "../include/utilities.h"
+#include "../include/piston_engine_simulator.h"
 
 #include "../scripting/include/compiler.h"
 
 #include <chrono>
 #include <stdlib.h>
 #include <sstream>
+#include <fstream>
+#include <algorithm>
 
 #if ATG_ENGINE_SIM_DISCORD_ENABLED
 #include "../discord/Discord.h"
@@ -77,7 +80,7 @@ EngineSimApplication::EngineSimApplication() {
     m_gameWindowHeight = 256;
     m_screenWidth = 256;
     m_screenHeight = 256;
-    m_screen = 0;
+    m_screen = 3;
     m_viewParameters.Layer0 = 0;
     m_viewParameters.Layer1 = 0;
 
@@ -111,17 +114,31 @@ void EngineSimApplication::initialize(void *instance, ysContextObject::DeviceAPI
     const std::string winTitle = "Engine Sim | AngeTheGreat | v" + s_buildVersion;
     dbasic::DeltaEngine::GameEngineSettings settings;
     settings.API = api;
-    settings.DepthBuffer = false;
+    settings.DepthBuffer = true;
     settings.Instance = instance;
     settings.ShaderDirectory = shaderPath.c_str();
     settings.WindowTitle = winTitle.c_str();
     settings.WindowPositionX = 0;
     settings.WindowPositionY = 0;
     settings.WindowStyle = ysWindow::WindowStyle::Windowed;
-    settings.WindowWidth = 1920;
-    settings.WindowHeight = 1080;
+    RECT workArea{};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
+        // Use Windows' DPI-adjusted work area so controls stay above the taskbar.
+        settings.WindowPositionX = workArea.left + 12;
+        settings.WindowPositionY = workArea.top + 12;
+        settings.WindowWidth = (std::min)(1600L, workArea.right - workArea.left - 24);
+        settings.WindowHeight = (std::min)(1000L, workArea.bottom - workArea.top - 24);
+    }
+    else {
+        settings.WindowWidth = 1280;
+        settings.WindowHeight = 720;
+    }
 
     m_engine.CreateGameWindow(settings);
+
+    // The app renders its own text. The unused console shares this text batch
+    // and would replace its font atlas during EndFrame, hiding Roboto glyphs.
+    m_engine.SetConsoleEnabled(false);
 
     m_engine.GetDevice()->CreateSubRenderTarget(
         &m_mainRenderTarget,
@@ -146,11 +163,14 @@ void EngineSimApplication::initialize(void *instance, ysContextObject::DeviceAPI
     m_assetManager.SetEngine(&m_engine);
 
     m_engine.GetDevice()->CreateIndexBuffer(
-        &m_geometryIndexBuffer, sizeof(unsigned short) * 200000, nullptr);
+        &m_geometryIndexBuffer, sizeof(unsigned short) * 600000, nullptr);
     m_engine.GetDevice()->CreateVertexBuffer(
-        &m_geometryVertexBuffer, sizeof(dbasic::Vertex) * 100000, nullptr);
+        &m_geometryVertexBuffer, sizeof(dbasic::Vertex) * 400000, nullptr);
 
-    m_geometryGenerator.initialize(100000, 200000);
+    m_geometryGenerator.initialize(400000, 600000);
+
+    // This freely licensed font is already bundled with Delta Studio.
+    m_engine.LoadFont(&m_readableFont, (enginePath + "/fonts/roboto/Roboto-Regular.ttf").c_str(), 1024, 40);
 
     initialize();
 }
@@ -162,7 +182,7 @@ void EngineSimApplication::initialize() {
 
     m_textRenderer.SetEngine(&m_engine);
     m_textRenderer.SetRenderer(m_engine.GetUiRenderer());
-    m_textRenderer.SetFont(m_engine.GetConsole()->GetFont());
+    m_textRenderer.SetFont(m_readableFont ? m_readableFont : m_engine.GetConsole()->GetFont());
 
     loadScript();
 
@@ -202,7 +222,7 @@ void EngineSimApplication::initialize() {
 void EngineSimApplication::process(float frame_dt) {
     frame_dt = static_cast<float>(clamp(frame_dt, 1 / 200.0f, 1 / 30.0f));
 
-    double speed = 1.0 / 1.0;
+    double speed = m_learning.slowMotion ? 0.025 : 1.0;
     if (m_engine.IsKeyDown(ysKey::Code::N1)) {
         speed = 1 / 10.0;
     }
@@ -217,16 +237,6 @@ void EngineSimApplication::process(float frame_dt) {
     }
     else if (m_engine.IsKeyDown(ysKey::Code::N5)) {
         speed = 1 / 1000.0;
-    }
-
-    if (m_engine.IsKeyDown(ysKey::Code::F1)) {
-        m_displayAngle += frame_dt * 1.0f;
-    }
-    else if (m_engine.IsKeyDown(ysKey::Code::F2)) {
-        m_displayAngle -= frame_dt * 1.0f;
-    }
-    else if (m_engine.ProcessKeyDown(ysKey::Code::F3)) {
-        m_displayAngle = 0.0f;
     }
 
     m_simulator->setSimulationSpeed(speed);
@@ -312,6 +322,11 @@ void EngineSimApplication::process(float frame_dt) {
 }
 
 void EngineSimApplication::render() {
+    if (m_engineView->is3d()) {
+        renderEngine3d();
+        m_uiManager.render();
+        return;
+    }
     for (SimulationObject *object : m_objects) {
         object->generateGeometry();
     }
@@ -334,6 +349,161 @@ void EngineSimApplication::render() {
     m_uiManager.render();
 }
 
+void EngineSimApplication::renderEngine3d() {
+    const unsigned int colors[] = {0xCAD7E0, 0x8193A4, 0x455667, 0x506C7C, 0x677181, 0xD6AE63, 0x202D3B,
+        0x61CBD3, 0xE89867, 0xA999DC, 0xE8E8D8, 0x815E38, 0xFFBC58};
+    static_assert(sizeof(colors)/sizeof(colors[0]) == EngineMesh::MaterialCount, "Every material needs a color");
+    auto &vars = m_shaders.m_objectVariables;
+    vars = dbasic::ShaderObjectVariables{};
+    vars.ColorReplace = 1; vars.Lit = 1;
+    vars.Metallic = 0.12f; vars.SpecularPower = 40; vars.SpecularMix = 0.3f;
+    const bool inspect = isLearningWorkspace() && m_learning.selected != EnginePart::None;
+    for (int material = 0; material < EngineMesh::MaterialCount; ++material) {
+        const auto &batch = m_engineMesh.vertices[material];
+        for (int selectedPass=0; selectedPass<2; ++selectedPass) {
+            if (!inspect && selectedPass==1) continue;
+            ysVector color=ysColor::srgbiToLinear(colors[material]);
+            if(selectedPass==1) color=ysColor::srgbiToLinear(0xFFE0A0);
+            m_shaders.SetBaseColor(color);
+            vars.Emission = selectedPass ? ysMath::LoadVector(0.12f,0.065f,0.015f,0) : ysMath::Constants::Zero;
+            if(material==EngineMesh::CombustionGlow) vars.Emission=ysMath::LoadVector(0.35f,0.1f,0,0);
+            vars.Lit = (material == EngineMesh::Grid) ? 0 : 1;
+            GeometryGenerator::GeometryIndices indices;
+            int count=0;
+            m_geometryGenerator.startShape();
+            const auto flush = [&]() {
+                m_geometryGenerator.endShape(&indices);
+                if(indices.FaceCount>0) m_engine.DrawGeneric(m_shaders.GetRegularFlags(),m_geometryIndexBuffer,m_geometryVertexBuffer,
+                    sizeof(dbasic::Vertex),indices.BaseIndex,indices.BaseVertex,indices.FaceCount,true,0);
+                m_geometryGenerator.startShape(); count=0;
+            };
+            for(size_t i=0;i<batch.size();i+=3) {
+                const auto &src=batch[i];
+                const bool selected=inspect && src.part==m_learning.selected && (src.cylinder<0 || src.cylinder==m_learning.cylinder);
+                if(selected != (selectedPass==1)) continue;
+                if(count>=60000) flush();
+                dbasic::Vertex v[3];
+                for(int j=0;j<3;++j) {
+                    const auto &vertex=batch[i+j];
+                    v[j].Pos=ysMath::LoadVector(vertex.position.x,vertex.position.y,vertex.position.z,1);
+                    v[j].Normal=ysMath::LoadVector(vertex.normal.x,vertex.normal.y,vertex.normal.z,0);
+                }
+                if(!m_geometryGenerator.generateTriangle3d(v[0],v[1],v[2])) break;
+                count+=3;
+            }
+            flush();
+        }
+    }
+    vars = dbasic::ShaderObjectVariables{};
+    vars.ColorReplace = 1; vars.Lit = 0;
+}
+
+void EngineSimApplication::setPaused(bool paused) {
+    m_paused = paused;
+    if(m_audioSource) m_audioSource->SetMode(paused ? ysAudioSource::Mode::Stop :
+        (m_iceEngine ? ysAudioSource::Mode::Loop : ysAudioSource::Mode::Stop));
+}
+
+void EngineSimApplication::toggleLearningWorkspace() {
+    m_screen = isLearningWorkspace() ? 0 : 3;
+}
+
+void EngineSimApplication::performAction(SimulatorAction action, bool pressed, ActionSource source) {
+    // Starter is held; the other commands fire once on a key press or UI click.
+    if (action == SimulatorAction::Starter) {
+        if (source == ActionSource::Keyboard) m_keyboardStarterHeld = pressed;
+        else m_starterHeld = pressed;
+
+        const bool active = m_engine.GetGameWindow() && m_engine.GetGameWindow()->IsActive();
+        if (!active) m_starterHeld = m_keyboardStarterHeld = false;
+        if (m_simulator) {
+            const bool enabled = active && (m_starterHeld || m_keyboardStarterHeld);
+            const bool changed = enabled != m_simulator->m_starterMotor.m_enabled;
+            m_simulator->m_starterMotor.m_enabled = enabled;
+            if (changed && m_infoCluster) m_infoCluster->setLogMessage(enabled
+                ? "STARTER ENABLED" : "STARTER DISABLED");
+        }
+        return;
+    }
+    if (!pressed) return;
+
+    switch (action) {
+    case SimulatorAction::Mode:
+        m_engineView->set3d(!m_engineView->is3d());
+        break;
+    case SimulatorAction::Reset:
+        m_engineView->resetCamera();
+        m_displayAngle = 0;
+        break;
+    case SimulatorAction::Cutaway:
+        m_engineView->m_cutaway = !m_engineView->m_cutaway;
+        break;
+    case SimulatorAction::Learn:
+        toggleLearningWorkspace();
+        break;
+    case SimulatorAction::Labels:
+        m_learning.labels = !m_learning.labels;
+        break;
+    case SimulatorAction::Exploded:
+        m_learning.exploded = !m_learning.exploded;
+        break;
+    case SimulatorAction::Ignition:
+        if (m_iceEngine) {
+            auto *ignition = m_iceEngine->getIgnitionModule();
+            ignition->m_enabled = !ignition->m_enabled;
+            if (m_infoCluster) m_infoCluster->setLogMessage(ignition->m_enabled
+                ? "IGNITION ENABLED" : "IGNITION DISABLED");
+        }
+        break;
+    case SimulatorAction::Pause:
+        setPaused(!m_paused);
+        break;
+    case SimulatorAction::Slow:
+        m_learning.slowMotion = !m_learning.slowMotion;
+        break;
+    case SimulatorAction::Starter:
+        break;
+    }
+}
+
+bool EngineSimApplication::projectEnginePoint(EngineMesh::Vec3 point, Point *screen) const {
+    if(!m_engineView->is3d()) return false;
+    const auto delta=point-m_cameraEye3d;
+    const float depth=delta.dot(m_cameraForward3d);
+    if(depth<=0.001f) return false;
+    const float tangent=std::tan(3.14159265359f/8);
+    const float x=delta.dot(m_cameraRight3d)/(depth*tangent*m_cameraAspect3d);
+    const float y=delta.dot(m_cameraUp3d)/(depth*tangent);
+    const auto &bounds=m_engineView->m_bounds;
+    *screen={bounds.left()+(x+1)*bounds.width()*0.5f,bounds.bottom()+(y+1)*bounds.height()*0.5f};
+    return std::abs(x)<0.98f && std::abs(y)<0.95f;
+}
+
+bool EngineSimApplication::getPartAnchor(EnginePart part, int cylinder, Point *screen) const {
+    EngineMesh::Vec3 anchor;
+    return (m_engineMesh.anchor(part,cylinder,&anchor) || m_engineMesh.anchor(part,-1,&anchor)) && projectEnginePoint(anchor,screen);
+}
+
+bool EngineSimApplication::selectEnginePart(const Point &screen) {
+    if(!m_engineView->is3d() || !m_engineView->m_bounds.overlaps(screen)) return false;
+    const auto &b=m_engineView->m_bounds;
+    const float x=2*(screen.x-b.left())/b.width()-1, y=2*(screen.y-b.bottom())/b.height()-1;
+    const float t=std::tan(3.14159265359f/8);
+    const auto ray=(m_cameraForward3d+m_cameraRight3d*(x*t*m_cameraAspect3d)+m_cameraUp3d*(y*t)).normalized();
+    const auto hit=m_engineMesh.pick(m_cameraEye3d,ray);
+    if(hit.part==EnginePart::None) return false;
+    m_learning.selected=hit.part;
+    if(hit.cylinder>=0) m_learning.cylinder=hit.cylinder;
+    m_screen=3;
+    m_learningPanel->setTab(LearningPanel::Tab::Parts);
+    return true;
+}
+EngineMesh::Vec3 EngineSimApplication::cameraPanDisplacement(const Point &pixels) const {
+    const float radius=(std::max)(m_engineMesh.radius(),0.1f);
+    const float distance=radius*3.25f*(std::max)(1.0f,1.0f/m_cameraAspect3d)/m_engineView->m_zoom3d;
+    const float scale=2*distance*std::tan(3.14159265359f/8)/(std::max)(1.0f,m_engineView->m_bounds.height());
+    return m_cameraRight3d*(-pixels.x*scale)+m_cameraUp3d*(-pixels.y*scale);
+}
 float EngineSimApplication::pixelsToUnits(float pixels) const {
     const float f = m_displayHeight / m_engineView->m_bounds.height();
     return pixels * f;
@@ -345,10 +515,31 @@ float EngineSimApplication::unitsToPixels(float units) const {
 }
 
 void EngineSimApplication::run() {
+    int checkFrame = 0;
+    int capturedFrames = 0;
+    bool interactionChecksPassed = true;
+    double peakCheckRpm = 0;
+    std::ofstream verification;
+    if (m_visualCheck) verification.open("visual-check.log");
     while (true) {
         m_engine.StartFrame();
 
         if (!m_engine.IsOpen()) break;
+        if (m_engine.ProcessKeyDown(ysKey::Code::F4)) performAction(SimulatorAction::Mode);
+        if (m_engine.ProcessKeyDown(ysKey::Code::F5)) performAction(SimulatorAction::Cutaway);
+        if (m_engine.ProcessKeyDown(ysKey::Code::F6)) performAction(SimulatorAction::Learn);
+        if (m_engine.ProcessKeyDown(ysKey::Code::F7)) performAction(SimulatorAction::Labels);
+        if (m_engine.ProcessKeyDown(ysKey::Code::F8)) performAction(SimulatorAction::Exploded);
+        if (m_engine.ProcessKeyDown(ysKey::Code::F9)) performAction(SimulatorAction::Slow);
+        if (m_engine.ProcessKeyDown(ysKey::Code::P)) performAction(SimulatorAction::Pause);
+        if (m_engine.ProcessKeyDown(ysKey::Code::F3)) performAction(SimulatorAction::Reset);
+        const float orbitStep = (std::min)(m_engine.GetFrameLength(), 0.05f);
+        if (m_engine.IsKeyDown(ysKey::Code::F1)) {
+            if (m_engineView->is3d()) m_engineView->m_yaw += orbitStep; else m_displayAngle += orbitStep;
+        }
+        if (m_engine.IsKeyDown(ysKey::Code::F2)) {
+            if (m_engineView->is3d()) m_engineView->m_yaw -= orbitStep; else m_displayAngle -= orbitStep;
+        }
         if (m_engine.ProcessKeyDown(ysKey::Code::Escape)) {
             break;
         }
@@ -356,14 +547,12 @@ void EngineSimApplication::run() {
         if (m_engine.ProcessKeyDown(ysKey::Code::Return)) {
             m_audioSource->SetMode(ysAudioSource::Mode::Stop);
             loadScript();
-            if (m_simulator->getEngine() != nullptr) {
-                m_audioSource->SetMode(ysAudioSource::Mode::Loop);
-            }
+            setPaused(m_paused);
         }
 
         if (m_engine.ProcessKeyDown(ysKey::Code::Tab)) {
             m_screen++;
-            if (m_screen > 2) m_screen = 0;
+            if (m_screen > 3) m_screen = 0;
         }
 
         if (m_engine.ProcessKeyDown(ysKey::Code::F)) {
@@ -384,6 +573,26 @@ void EngineSimApplication::run() {
         updateScreenSizeStability();
 
         processEngineInput();
+        if (m_visualCheck && m_iceEngine != nullptr) {
+            ++checkFrame;
+            m_iceEngine->getIgnitionModule()->m_enabled = true;
+            m_simulator->m_starterMotor.m_enabled = checkFrame < 180 || (checkFrame > 200 && checkFrame < 270);
+            if (checkFrame == 75) {
+                // Exercise the same orbit and zoom handlers as real mouse input.
+                const Point dragStart = m_engineView->m_bounds.getPosition(Bounds::center);
+                m_engineView->onMouseDown(dragStart);
+                m_engineView->onDrag({}, dragStart, dragStart + Point(-175, 10));
+                m_engineView->onMouseScroll(120);
+            }
+            if (checkFrame == 120) m_engineView->m_cutaway = false;
+            if (checkFrame == 160) m_engineView->set3d(false);
+            if (checkFrame == 200) {
+                m_audioSource->SetMode(ysAudioSource::Mode::Stop);
+                loadScript();
+                m_audioSource->SetMode(ysAudioSource::Mode::Loop);
+            }
+            interactionChecksPassed = verifyLearningFrame(checkFrame, verification) && interactionChecksPassed;
+        }
 
         if (m_engine.ProcessKeyDown(ysKey::Code::Insert) &&
             m_engine.GetGameWindow()->IsActive()) {
@@ -399,7 +608,7 @@ void EngineSimApplication::run() {
             stopRecording();
         }
 
-        if (!m_paused || m_engine.ProcessKeyDown(ysKey::Code::Right)) {
+        if (m_iceEngine && (!m_paused || m_engine.ProcessKeyDown(ysKey::Code::Right))) {
             process(m_engine.GetFrameLength());
         }
 
@@ -408,6 +617,24 @@ void EngineSimApplication::run() {
         renderScene();
 
         m_engine.EndFrame();
+        if (m_visualCheck) {
+            if (checkFrame == 60 || checkFrame == 110 || checkFrame == 150 || checkFrame == 190 || checkFrame == 240
+                || checkFrame == 280 || checkFrame == 300 || checkFrame == 320 || checkFrame == 340 || checkFrame == 355
+                || checkFrame == 375 || checkFrame == 390 || checkFrame == 410 || checkFrame == 430 || checkFrame == 450 || checkFrame == 480) {
+                const std::string path="visual-check-"+std::to_string(checkFrame)+".bmp";
+                if(captureFrame(path)) ++capturedFrames;
+                peakCheckRpm = (std::max)(peakCheckRpm,std::abs(m_iceEngine->getRpm()));
+                verification << "frame=" << checkFrame << " mode=" << (m_engineView->is3d()?"3D":"2D")
+                    << " vertices=" << m_engineMesh.vertexCount() << " rpm=" << m_iceEngine->getRpm()
+                    << " crank=" << m_iceEngine->getOutputCrankshaft()->m_body.theta << " image=" << path << std::endl;
+            }
+            if(checkFrame >= 480 || m_iceEngine == nullptr) {
+                m_visualCheckPassed = capturedFrames == 16 && peakCheckRpm > 10 && m_iceEngine != nullptr && interactionChecksPassed;
+                verification << (m_visualCheckPassed ? "PASS" : "FAIL") << ": captures=" << capturedFrames
+                    << " peak_rpm=" << peakCheckRpm << std::endl;
+                break;
+            }
+        }
 
         if (isRecording()) {
             recordFrame();
@@ -439,6 +666,8 @@ void EngineSimApplication::loadEngine(
     Vehicle *vehicle,
     Transmission *transmission)
 {
+    if (engine == nullptr || vehicle == nullptr || transmission == nullptr) return;
+
     destroyObjects();
 
     if (m_simulator != nullptr) {
@@ -466,13 +695,6 @@ void EngineSimApplication::loadEngine(
     m_transmission = transmission;
 
     m_simulator = engine->createSimulator(vehicle, transmission);
-
-    if (engine == nullptr || vehicle == nullptr || transmission == nullptr) {
-        m_iceEngine = nullptr;
-        m_viewParameters.Layer1 = 0;
-
-        return;
-    }
 
     createObjects(engine);
 
@@ -521,6 +743,12 @@ void EngineSimApplication::drawGeneratedUi(
     int layer)
 {
     drawGenerated(indices, layer, m_shaders.GetUiFlags());
+}
+
+void EngineSimApplication::drawModel2d(dbasic::StageEnableFlags flags, dbasic::ModelAsset *model, int layer) {
+    // The original 2D scene and HUD use painter's order, even with a 3D depth buffer available.
+    m_engine.DrawGeneric(flags, model->GetIndexBuffer(), model->GetVertexBuffer(), model->GetVertexSize(),
+        model->GetBaseIndex(), model->GetBaseVertex(), model->GetFaceCount(), false, layer);
 }
 
 void EngineSimApplication::drawGenerated(
@@ -616,6 +844,8 @@ const SimulationObject::ViewParameters &
 }
 
 void EngineSimApplication::loadScript() {
+    m_starterHeld = m_keyboardStarterHeld = false;
+    performAction(SimulatorAction::Starter, false);
     Engine *engine = nullptr;
     Vehicle *vehicle = nullptr;
     Transmission *transmission = nullptr;
@@ -640,6 +870,18 @@ void EngineSimApplication::loadScript() {
 
     compiler.destroy();
 #endif /* ATG_ENGINE_SIM_PIRANHA_ENABLED */
+
+    if (engine == nullptr) {
+        m_scriptError = "Script could not load. Check build/error_log.log, fix assets/main.mr, then press Enter.";
+        if (!m_simulator) {
+            // UI getters only need an idle object; allocate physics resources once an engine loads.
+            m_simulator = new PistonEngineSimulator;
+            refreshUserInterface();
+        }
+        if (m_infoCluster) m_infoCluster->setLogMessage(m_scriptError);
+        return; // A failed reload preserves the last working engine.
+    }
+    m_scriptError.clear();
 
     if (vehicle == nullptr) {
         Vehicle::Parameters vehParams;
@@ -668,6 +910,9 @@ void EngineSimApplication::loadScript() {
 }
 
 void EngineSimApplication::processEngineInput() {
+    const bool active = m_engine.GetGameWindow()->IsActive();
+    performAction(SimulatorAction::Starter, active && m_engine.IsKeyDown(ysKey::Code::S),
+        ActionSource::Keyboard);
     if (m_iceEngine == nullptr) {
         return;
     }
@@ -856,29 +1101,8 @@ void EngineSimApplication::processEngineInput() {
     m_dynoSpeed = clamp(m_dynoSpeed, m_iceEngine->getDynoMinSpeed(), m_iceEngine->getDynoMaxSpeed());
     m_simulator->m_dyno.m_rotationSpeed = m_dynoSpeed;
 
-    const bool prevStarterEnabled = m_simulator->m_starterMotor.m_enabled;
-    if (m_engine.IsKeyDown(ysKey::Code::S)) {
-        m_simulator->m_starterMotor.m_enabled = true;
-    }
-    else {
-        m_simulator->m_starterMotor.m_enabled = false;
-    }
-
-    if (prevStarterEnabled != m_simulator->m_starterMotor.m_enabled) {
-        const std::string msg = m_simulator->m_starterMotor.m_enabled
-            ? "STARTER ENABLED"
-            : "STARTER DISABLED";
-        m_infoCluster->setLogMessage(msg);
-    }
-
     if (m_engine.ProcessKeyDown(ysKey::Code::A)) {
-        m_simulator->getEngine()->getIgnitionModule()->m_enabled =
-            !m_simulator->getEngine()->getIgnitionModule()->m_enabled;
-
-        const std::string msg = m_simulator->getEngine()->getIgnitionModule()->m_enabled
-            ? "IGNITION ENABLED"
-            : "IGNITION DISABLED";
-        m_infoCluster->setLogMessage(msg);
+        performAction(SimulatorAction::Ignition);
     }
 
     if (m_engine.ProcessKeyDown(ysKey::Code::Up)) {
@@ -941,7 +1165,20 @@ void EngineSimApplication::renderScene() {
 
     m_shaders.CalculateUiCamera(screenWidth, screenHeight);
 
-    if (m_screen == 0) {
+    m_learningPanel->setVisible(m_screen == 3);
+
+    if (m_screen == 3) {
+        const float side = (std::min)(screenWidth*0.48f, (std::max)(370.0f, screenWidth*0.31f));
+        m_engineView->setDrawFrame(false);
+        m_engineView->setBounds(Bounds(0, screenWidth-side, 0, static_cast<float>(screenHeight)));
+        m_engineView->setLocalPosition({0,0});
+        m_learningPanel->m_bounds = Bounds(screenWidth-side, static_cast<float>(screenWidth), 0, static_cast<float>(screenHeight));
+        m_engineView->setVisible(true);
+        m_rightGaugeCluster->setVisible(false); m_oscCluster->setVisible(false);
+        m_performanceCluster->setVisible(false); m_loadSimulationCluster->setVisible(false);
+        m_mixerCluster->setVisible(false); m_infoCluster->setVisible(false);
+    }
+    else if (m_screen == 0) {
         Bounds windowBounds((float)screenWidth, (float)screenHeight, { 0, (float)screenHeight });
         Grid grid;
         grid.v_cells = 2;
@@ -1024,7 +1261,23 @@ void EngineSimApplication::renderScene() {
         m_engineView->m_bounds.getPosition(Bounds::tl).x,
         screenHeight - m_engineView->m_bounds.getPosition(Bounds::tl).y
     );
-    m_shaders.CalculateCamera(
+    if (m_engineView->is3d()) {
+        m_engineMesh.build(m_iceEngine, m_engineView->m_cutaway, m_learning.exploded);
+        const auto center=m_engineMesh.center()+m_engineView->m_pan3d;
+        const float radius=(std::max)(m_engineMesh.radius(),0.1f);
+        const float fit=(std::max)(1.0f,1.0f/cameraAspectRatio);
+        const float distance=radius*3.25f*fit/m_engineView->m_zoom3d;
+        const float yaw=m_engineView->m_yaw, pitch=m_engineView->m_pitch;
+        const EngineMesh::Vec3 outward{std::sin(yaw)*std::cos(pitch),std::sin(pitch),std::cos(yaw)*std::cos(pitch)};
+        m_cameraEye3d=center+outward*distance;
+        m_cameraForward3d=outward*-1;
+        m_cameraRight3d=m_cameraForward3d.cross({0,1,0}).normalized();
+        m_cameraUp3d=m_cameraRight3d.cross(m_cameraForward3d).normalized();
+        m_cameraAspect3d=cameraAspectRatio;
+        m_shaders.CalculateCamera3d(cameraAspectRatio,ysMath::LoadVector(center.x,center.y,center.z,1),
+            distance,m_engineView->m_yaw,m_engineView->m_pitch);
+    }
+    else m_shaders.CalculateCamera(
         cameraAspectRatio * m_displayHeight / m_engineView->m_zoom,
         m_displayHeight / m_engineView->m_zoom,
         m_engineView->m_bounds,
@@ -1060,6 +1313,8 @@ void EngineSimApplication::refreshUserInterface() {
     m_loadSimulationCluster = m_uiManager.getRoot()->addElement<LoadSimulationCluster>();
     m_mixerCluster = m_uiManager.getRoot()->addElement<MixerCluster>();
     m_infoCluster = m_uiManager.getRoot()->addElement<InfoCluster>();
+    m_learningPanel = m_uiManager.getRoot()->addElement<LearningPanel>();
+    if (m_iceEngine) m_learning.cylinder = (std::min)(m_learning.cylinder, m_iceEngine->getCylinderCount()-1);
 
     m_infoCluster->setEngine(m_iceEngine);
     m_rightGaugeCluster->m_simulator = m_simulator;
@@ -1133,4 +1388,24 @@ void EngineSimApplication::recordFrame() {
 
     m_encoder.submitFrame();
 #endif /* ATG_ENGINE_SIM_VIDEO_CAPTURE */
+}
+
+bool EngineSimApplication::captureFrame(const std::string &path) {
+    // Read this application's render target; no desktop or other windows are captured.
+    const int w=m_engine.GetScreenWidth(), h=m_engine.GetScreenHeight();
+    if(w<=0 || h<=0) return false;
+    std::vector<uint8_t> rgba(static_cast<size_t>(w)*h*4);
+    if(m_engine.GetDevice()->ReadRenderTarget(m_engine.GetScreenRenderTarget(),rgba.data()) != ysError::None) return false;
+    BITMAPFILEHEADER file{};
+    BITMAPINFOHEADER info{};
+    file.bfType=0x4D42; file.bfOffBits=sizeof(file)+sizeof(info);
+    file.bfSize=file.bfOffBits+static_cast<DWORD>(rgba.size());
+    info.biSize=sizeof(info); info.biWidth=w; info.biHeight=-h;
+    info.biPlanes=1; info.biBitCount=32; info.biCompression=BI_RGB;
+    for(size_t i=0;i<rgba.size();i+=4) std::swap(rgba[i],rgba[i+2]);
+    std::ofstream out(path,std::ios::binary);
+    out.write(reinterpret_cast<const char*>(&file),sizeof(file));
+    out.write(reinterpret_cast<const char*>(&info),sizeof(info));
+    out.write(reinterpret_cast<const char*>(rgba.data()),rgba.size());
+    return out.good();
 }

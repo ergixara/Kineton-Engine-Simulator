@@ -59,6 +59,8 @@ add_library(engine-sim STATIC
     src/direct_throttle_linkage.cpp
     src/dynamometer.cpp
     src/engine.cpp
+    src/engine_mesh.cpp
+    src/learning_content.cpp
     src/exhaust_system.cpp
     src/feedback_comb_filter.cpp
     src/filter.cpp
@@ -103,6 +105,7 @@ add_library(engine-sim STATIC
     include/direct_throttle_linkage.h
     include/dynamometer.h
     include/engine.h
+    include/engine_mesh.h
     include/exhaust_system.h
     include/feedback_comb_filter.h
     include/filter.h
@@ -225,6 +228,8 @@ add_executable(engine-sim-app WIN32
     src/oscilloscope.cpp
     src/shaders.cpp
     src/engine_view.cpp
+    src/learning_panel.cpp
+    src/learning_verification.cpp
     src/right_gauge_cluster.cpp
     src/cylinder_temperature_gauge.cpp
     src/labeled_gauge.cpp
@@ -310,6 +315,9 @@ add_executable(engine-sim-test
     test/gas_system_tests.cpp
     test/function_test.cpp
     test/synthesizer_tests.cpp
+    test/engine_mesh_tests.cpp
+    test/learning_content_tests.cpp
+    test/input_backend_tests.cpp
 )
 
 target_link_libraries(engine-sim-test

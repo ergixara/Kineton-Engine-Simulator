@@ -34,6 +34,7 @@ class Shaders : public dbasic::ShaderBase {
             float screenHeight,
             float angle = 0.0f);
         void CalculateUiCamera(float screenWidth, float screenHeight);
+        void CalculateCamera3d(float aspect, const ysVector &target, float distance, float yaw, float pitch);
 
         void SetClearColor(const ysVector &col);
 

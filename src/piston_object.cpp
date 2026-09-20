@@ -40,7 +40,7 @@ void PistonObject::render(const ViewParameters *view) {
         (float)(-m_piston->getCompressionHeight() - m_piston->getWristPinLocation()));
 
     m_app->getShaders()->SetBaseColor(col);
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("Piston"),
         0x32 - layer);

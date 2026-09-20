@@ -3,6 +3,8 @@
 #include "../include/function.h"
 
 #include <stdlib.h>
+#include <algorithm>
+#include <cmath>
 
 TEST(FunctionTests, FunctionSanityCheck) {
     Function f;
@@ -66,15 +68,21 @@ TEST(FunctionTests, FunctionGaussianTest) {
     f.addSample(5.0, 10.0);
     f.addSample(4.0, 9.0);
 
-    EXPECT_NEAR(f.sampleGaussian(2.0), 1.0, 0.1);
-    EXPECT_NEAR(f.sampleGaussian(4.0), 9.0, 0.3);
+    // Gaussian smoothing blends adjacent samples; it does not interpolate them.
+    // Compare against the analytical truncated Gaussian rather than cached values.
+    const double values[] = { 1.0, 1.0, 1.0, 5.0, 9.0, 10.0 };
+    for (double x : { 2.0, 2.5, 4.0 }) {
+        double weighted = 0.0, weights = 0.0;
+        for (int i = 0; i < 6; ++i) {
+            const double distance = i - x;
+            const double weight = std::max(0.0, std::exp(-distance * distance) - std::exp(-9.0));
+            weighted += weight * values[i];
+            weights += weight;
+        }
+        EXPECT_NEAR(f.sampleGaussian(x), weighted / weights, 1E-5);
+    }
     EXPECT_NEAR(f.sampleGaussian(100.0), 10.0, 1E-3);
     EXPECT_NEAR(f.sampleGaussian(-100.0), 1.0, 1E-3);
-
-    for (double s = 2.0; s <= 3.0; s += 0.001) {
-        const double v = f.sampleGaussian(s);
-        std::cerr << v << "\n";
-    }
 
     f.destroy();
 }

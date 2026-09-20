@@ -105,18 +105,20 @@ TEST(GasSystemTests, PressureEquilibriumMaxFlow) {
     );
 
     const double maxFlowIn = system1.pressureEquilibriumMaxFlow(&system2);
-
-    system1.loseN(maxFlowIn, system1.kineticEnergyPerMol());
-    system2.gainN(maxFlowIn, system1.kineticEnergyPerMol(), system1.mix());
+    ASSERT_LT(maxFlowIn, 0.0); // Negative means gas enters system1.
+    const double incomingEnergy = system2.kineticEnergyPerMol();
+    system1.gainN(-maxFlowIn, incomingEnergy, system2.mix());
+    system2.loseN(-maxFlowIn, incomingEnergy);
 
     EXPECT_NEAR(system1.pressure(), system2.pressure(), 1E-6);
 
     system1.changePressure(units::pressure(100.0, units::atm));
 
     const double maxFlowOut = system1.pressureEquilibriumMaxFlow(&system2);
-
-    system1.loseN(maxFlowIn, system1.kineticEnergyPerMol());
-    system2.gainN(maxFlowIn, system1.kineticEnergyPerMol(), system1.mix());
+    ASSERT_GT(maxFlowOut, 0.0);
+    const double outgoingEnergy = system1.kineticEnergyPerMol();
+    system1.loseN(maxFlowOut, outgoingEnergy);
+    system2.gainN(maxFlowOut, outgoingEnergy, system1.mix());
 
     EXPECT_NEAR(system1.pressure(), system2.pressure(), 1E-6);
 }
@@ -135,7 +137,8 @@ TEST(GasSystemTests, PressureEquilibriumMaxFlowInfinite) {
     const double maxFlow = system1.pressureEquilibriumMaxFlow(P_env, T_env);
     const double E_k_per_mol = GasSystem::kineticEnergyPerMol(T_env, system1.degreesOfFreedom());
 
-    system1.gainN(maxFlow, E_k_per_mol);
+    ASSERT_LT(maxFlow, 0.0);
+    system1.gainN(-maxFlow, E_k_per_mol);
 
     EXPECT_NEAR(system1.pressure(), P_env, 1E-6);
 }
@@ -153,7 +156,8 @@ TEST(GasSystemTests, PressureEquilibriumMaxFlowInfiniteOverpressure) {
 
     const double maxFlow = system1.pressureEquilibriumMaxFlow(P_env, T_env);
 
-    system1.loseN(maxFlow, GasSystem::kineticEnergyPerMol(T_env, 5));
+    ASSERT_GT(maxFlow, 0.0);
+    system1.loseN(maxFlow, system1.kineticEnergyPerMol());
 
     EXPECT_NEAR(system1.pressure(), P_env, 1E-6);
 }

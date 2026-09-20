@@ -121,7 +121,7 @@ void CylinderHeadObject::render(const ViewParameters *view) {
 
     m_app->getShaders()->SetObjectTransform(T_head);
     m_app->getShaders()->SetBaseColor(col);
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("CylinderHead"),
         0x0);
@@ -147,7 +147,7 @@ void CylinderHeadObject::render(const ViewParameters *view) {
 
     m_app->getShaders()->SetObjectTransform(T_intakeValve);
     m_app->getShaders()->SetBaseColor(m_app->getBlue());
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("Valve"),
         0x33);
@@ -170,7 +170,7 @@ void CylinderHeadObject::render(const ViewParameters *view) {
 
     m_app->getShaders()->SetObjectTransform(T_exhaustValve);
     m_app->getShaders()->SetBaseColor(m_app->getYellow());
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("Valve"),
         0x33);

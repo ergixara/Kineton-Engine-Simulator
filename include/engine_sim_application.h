@@ -22,11 +22,16 @@
 #include "info_cluster.h"
 #include "application_settings.h"
 #include "transmission.h"
+#include "engine_mesh.h"
+#include "learning_content.h"
+#include "learning_panel.h"
+#include "simulator_action.h"
 
 #include "delta.h"
 #include "dtv.h"
 
 #include <vector>
+#include <iosfwd>
 
 class EngineSimApplication {
     private:
@@ -40,6 +45,22 @@ class EngineSimApplication {
 
         void initialize(void *instance, ysContextObject::DeviceAPI api);
         void run();
+        void setVisualCheck(bool enabled) { m_visualCheck = enabled; }
+        bool visualCheckPassed() const { return m_visualCheckPassed; }
+        LearningState &getLearningState() { return m_learning; }
+        bool isPaused() const { return m_paused; }
+        void setPaused(bool paused);
+        void performAction(SimulatorAction action, bool pressed = true,
+            ActionSource source = ActionSource::Pointer);
+        const std::string &getScriptError() const { return m_scriptError; }
+        void setStarterHeld(bool held) { performAction(SimulatorAction::Starter, held); }
+        void openPartLesson(EnginePart part) { m_learning.selected = part; m_screen = 3; m_learningPanel->setTab(LearningPanel::Tab::Parts); }
+        bool isLearningWorkspace() const { return m_screen == 3; }
+        void toggleLearningWorkspace();
+        bool projectEnginePoint(EngineMesh::Vec3 point, Point *screen) const;
+        bool getPartAnchor(EnginePart part, int cylinder, Point *screen) const;
+        bool selectEnginePart(const Point &screen);
+        EngineMesh::Vec3 cameraPanDisplacement(const Point &pixels) const;
         void destroy();
 
         void loadEngine(Engine *engine, Vehicle *vehicle, Transmission *transmission);
@@ -49,6 +70,7 @@ class EngineSimApplication {
         void drawGeneratedUi(
                 const GeometryGenerator::GeometryIndices &indices,
                 int layer = 0);
+        void drawModel2d(dbasic::StageEnableFlags flags, dbasic::ModelAsset *model, int layer);
         void drawGenerated(
                 const GeometryGenerator::GeometryIndices &indices,
                 int layer,
@@ -92,6 +114,9 @@ class EngineSimApplication {
         void loadScript();
         void processEngineInput();
         void renderScene();
+        void renderEngine3d();
+        bool captureFrame(const std::string &path);
+        bool verifyLearningFrame(int frame, std::ostream &log);
 
         void refreshUserInterface();
 
@@ -128,6 +153,15 @@ class EngineSimApplication {
         ysGPUBuffer *m_geometryIndexBuffer;
 
         GeometryGenerator m_geometryGenerator;
+        EngineMesh m_engineMesh;
+        LearningState m_learning;
+        std::string m_scriptError;
+        EngineMesh::Vec3 m_cameraEye3d, m_cameraRight3d, m_cameraUp3d, m_cameraForward3d;
+        float m_cameraAspect3d = 1;
+        dbasic::Font *m_readableFont = nullptr;
+        LearningPanel *m_learningPanel = nullptr;
+        bool m_visualCheck = false;
+        bool m_visualCheckPassed = false;
         dbasic::TextRenderer m_textRenderer;
 
         std::vector<SimulationObject *> m_objects;
@@ -150,6 +184,8 @@ class EngineSimApplication {
         SimulationObject::ViewParameters m_viewParameters;
 
         bool m_paused;
+        bool m_starterHeld = false;
+        bool m_keyboardStarterHeld = false;
 
     protected:
         void startRecording();

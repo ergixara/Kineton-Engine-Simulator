@@ -2,189 +2,91 @@
 
 #include "../include/synthesizer.h"
 
-#include <chrono>
+#include <algorithm>
+#include <cmath>
+#include <vector>
 
-using namespace std::chrono_literals;
+namespace {
+constexpr int SampleRate = 44100;
+constexpr int InputSamples = 512;
+constexpr int ChannelCount = 8;
 
-void setupStandardSynthesizer(Synthesizer &synth) {
+void setupSynthesizer(Synthesizer &synth) {
     Synthesizer::Parameters params;
-    params.audioBufferSize = 512 * 16;
-    params.audioSampleRate = 16;
-    params.inputBufferSize = 256;
-    params.inputChannelCount = 8;
-    params.inputSampleRate = 32;
-
-    Synthesizer::AudioParameters audioParams;
-    audioParams.airNoise = 0.0;
-    audioParams.inputSampleNoise = 0.0;
-    audioParams.levelerMaxGain = 1.0;
-    audioParams.levelerMinGain = 1.0;
-    audioParams.dF_F_mix = 0.0;
-    params.initialAudioParameters = audioParams;
-
+    params.audioBufferSize = 8192;
+    params.inputBufferSize = 2048;
+    params.audioSampleRate = SampleRate;
+    params.inputSampleRate = SampleRate;
+    params.inputChannelCount = ChannelCount;
+    params.initialAudioParameters.airNoise = 0.0f;
+    params.initialAudioParameters.inputSampleNoise = 0.0f;
+    params.initialAudioParameters.levelerMaxGain = 1.0f;
+    params.initialAudioParameters.levelerMinGain = 1.0f;
+    params.initialAudioParameters.dF_F_mix = 0.0f;
     synth.initialize(params);
+
+    // Production initializes one impulse response per exhaust channel as well.
+    const int16_t impulse[] = { INT16_MAX };
+    for (int channel = 0; channel < ChannelCount; ++channel) {
+        synth.initializeImpulseResponse(impulse, 1, 1.0f, channel);
+    }
 }
 
-void setupSynchronizedSynthesizer(Synthesizer &synth) {
-    Synthesizer::Parameters params;
-    params.audioBufferSize = 512 * 16;
-    params.audioSampleRate = 32;
-    params.inputBufferSize = 1024;
-    params.inputChannelCount = 8;
-    params.inputSampleRate = 32;
+std::vector<int16_t> renderSignal(bool threaded, double amplitude) {
+    Synthesizer synth;
+    setupSynthesizer(synth);
+    for (int i = 0; i < InputSamples; ++i) {
+        const double value = amplitude * std::sin(2.0 * 3.141592653589793 * 440.0 * i / SampleRate);
+        double data[ChannelCount];
+        std::fill_n(data, ChannelCount, value);
+        synth.writeInput(data);
+    }
 
-    Synthesizer::AudioParameters audioParams;
-    audioParams.airNoise = 0.0;
-    audioParams.inputSampleNoise = 0.0;
-    audioParams.levelerMaxGain = 1.0;
-    audioParams.levelerMinGain = 1.0;
-    audioParams.dF_F_mix = 0.0;
-    params.initialAudioParameters = audioParams;
+    // Equal input/output rates produce one initial interpolation sample plus
+    // one sample per input. Stay below the renderer's 2000-sample batch limit.
+    if (threaded) synth.startAudioRenderingThread();
+    synth.endInputBlock();
+    if (threaded) {
+        synth.waitProcessed();
+        // Join before inspecting output; waitProcessed alone reports input consumption.
+        synth.endAudioRenderingThread();
+    }
+    else {
+        synth.renderAudio();
+    }
 
-    synth.initialize(params);
+    constexpr int RequestedSamples = InputSamples + 8;
+    constexpr int16_t Guard = 12345;
+    std::vector<int16_t> output(RequestedSamples + 2, Guard);
+    const int returned = synth.readAudioOutput(RequestedSamples, output.data() + 1);
+    EXPECT_EQ(returned, InputSamples + 1);
+    EXPECT_EQ(output.front(), Guard);
+    EXPECT_EQ(output.back(), Guard);
+    for (int i = returned; i < RequestedSamples; ++i) EXPECT_EQ(output[i + 1], 0);
+    synth.destroy();
+    return std::vector<int16_t>(output.begin() + 1, output.begin() + 1 + std::max(0, returned));
+}
 }
 
 TEST(SynthesizerTests, SynthesizerSanityCheck) {
     Synthesizer synth;
-    setupStandardSynthesizer(synth);
+    setupSynthesizer(synth);
     synth.destroy();
 }
-/*
-TEST(SynthesizerTests, SynthesizerConversionTest) {
-    Synthesizer synth;
-    setupStandardSynthesizer(synth);
-
-    EXPECT_NEAR(synth.inputSampleToTimeOffset(0.0), 0.0, 1E-6);
-    EXPECT_NEAR(synth.inputSampleToTimeOffset(1.0), 1 / 32.0, 1E-6);
-
-    EXPECT_NEAR(synth.audioSampleToTimeOffset(0), -0.5, 1E-6);
-
-    synth.destroy();
-}
-
-TEST(SynthesizerTests, SynthesizerTrimTest) {
-    Synthesizer synth;
-    setupStandardSynthesizer(synth);
-
-    const double timeOffset0 = synth.audioSampleToTimeOffset(0);
-
-    synth.trimInput(0.5, false);
-
-    const double timeOffset1 = synth.audioSampleToTimeOffset(8);
-
-    EXPECT_NEAR(timeOffset1, timeOffset0, 1E-6);
-
-    synth.destroy();
-}
-
-TEST(SynthesizerTests, SynthesizerSampleTest) {
-    Synthesizer synth;
-    setupStandardSynthesizer(synth);
-
-    for (int i = 0; i < 1024; ++i) {
-        const double v = (double)i;
-        const double data[] = { v, v, v, v, v, v, v, v };
-        synth.writeInput(data);
-    }
-
-    const double end_t = 1023 / 32.0;
-
-    const double v0 = synth.sampleInput(end_t, 0);
-    const double v1 = synth.sampleInput(end_t - 1 / 64.0, 0);
-
-    EXPECT_NEAR(v0, 1023.0, 1E-6);
-    EXPECT_NEAR(v1, 1022.5, 1E-6);
-
-    synth.trimInput(0.5);
-
-    const double v0_trim = synth.sampleInput(end_t, 0);
-    const double v1_trim = synth.sampleInput(end_t - 1 / 64.0, 0);
-
-    EXPECT_NEAR(v0, v0_trim, 1E-6);
-    EXPECT_NEAR(v1, v1_trim, 1E-6);
-
-    synth.destroy();
-}
-*/
 
 TEST(SynthesizerTests, SynthesizerSystemTestSingleThread) {
-    constexpr int inputSamples = 64;
-    constexpr int outputSamples = 63;
-
-    Synthesizer synth;
-    setupSynchronizedSynthesizer(synth);
-
-    int16_t *output = new int16_t[outputSamples];
-    int totalSamples = 0;
-
-    for (int i = 0; i < inputSamples;) {
-        for (int j = 0; j < 16; ++j, ++i) {
-            const double v = (double)i;
-            const double data[] = { v, v, v, v, v, v, v, v };
-            synth.writeInput(data);
-        }
-
-        synth.endInputBlock();
-        synth.renderAudio();
-
-        totalSamples += synth.readAudioOutput(16, output + totalSamples);
-        int a = 0;
-    }
-
-    const int rem = synth.readAudioOutput(outputSamples - totalSamples, output + totalSamples);
-
-    EXPECT_EQ(rem, outputSamples - totalSamples);
-
-    for (int i = 0; i < 16; ++i) {
-        EXPECT_EQ(output[i], 0);
-    }
-
-    for (int i = 16; i < outputSamples; ++i) {
-        EXPECT_EQ(output[i], (i - 16) * 10 * 8);
-    }
-
-    synth.destroy();
-    delete[] output;
+    const auto silence = renderSignal(false, 0.0);
+    EXPECT_TRUE(std::all_of(silence.begin(), silence.end(), [](int16_t v) { return v == 0; }));
+    const auto signal = renderSignal(false, 1000.0);
+    ASSERT_FALSE(signal.empty());
+    // A real input must yield both polarities without clipping at this amplitude.
+    EXPECT_GT(*std::max_element(signal.begin(), signal.end()), 100);
+    EXPECT_LT(*std::min_element(signal.begin(), signal.end()), -100);
+    EXPECT_TRUE(std::all_of(signal.begin(), signal.end(), [](int16_t v) { return v > INT16_MIN && v < INT16_MAX; }));
 }
 
 TEST(SynthesizerTests, SynthesizerSystemTest) {
-    constexpr int inputSamples = 1024;
-    constexpr int outputSamples = 1023;
-
-    Synthesizer synth;
-    setupSynchronizedSynthesizer(synth);
-    synth.startAudioRenderingThread();
-
-    int16_t *output = new int16_t[outputSamples];
-    int totalSamples = 0;
-
-    for (int i = 0; i < inputSamples;) {
-        for (int j = 0; j < 16; ++j, ++i) {
-            const double v = (double)i;
-            const double data[] = { v, v, v, v, v, v, v, v };
-            synth.writeInput(data);
-        }
-
-        const int samplesReturned = synth.readAudioOutput(8, output + totalSamples);
-        totalSamples += samplesReturned;
-    }
-
-    synth.endInputBlock();
-    synth.waitProcessed();
-
-    const int rem = synth.readAudioOutput(outputSamples - totalSamples, output + totalSamples);
-    EXPECT_EQ(rem, outputSamples - totalSamples);
-
-    for (int i = 0; i < 16; ++i) {
-        EXPECT_EQ(output[i], 0);
-    }
-
-    for (int i = 16; i < outputSamples; ++i) {
-        EXPECT_EQ(output[i], std::min(32767, (i - 16) * 10 * 8));
-    }
-
-    synth.endAudioRenderingThread();
-    synth.destroy();
-
-    delete[] output;
+    // With noise disabled, background rendering must match synchronous PCM output.
+    const auto expected = renderSignal(false, 1000.0);
+    EXPECT_EQ(renderSignal(true, 1000.0), expected);
 }

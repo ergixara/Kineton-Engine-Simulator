@@ -16,6 +16,7 @@ class UiManager {
 
         void update(float dt);
         void render();
+        void cancelPointer();
 
         UiElement *getRoot() { return &m_root; }
 
@@ -28,6 +29,9 @@ class UiManager {
         Point m_drag_p0;
 
         int m_lastMouseScroll;
+        unsigned int m_inputResetSerial = 0;
+        ysMouse::Button m_activeButton = ysMouse::Button::Count;
+        bool m_dragged = false;
 
     protected:
         EngineSimApplication *m_app;

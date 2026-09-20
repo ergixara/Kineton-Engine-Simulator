@@ -80,7 +80,7 @@ void ConnectingRodObject::render(const ViewParameters *view) {
         (float)m_connectingRod->getBigEndLocal());
 
     m_app->getShaders()->SetBaseColor(color);
-    m_app->getEngine()->DrawModel(
+    m_app->drawModel2d(
         m_app->getShaders()->GetRegularFlags(),
         m_app->getAssetManager()->GetModelAsset("ConnectingRod"),
         0x32 - layer);

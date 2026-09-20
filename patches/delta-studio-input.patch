@@ -1,0 +1,501 @@
+diff --git a/engines/basic/include/delta_engine.h b/engines/basic/include/delta_engine.h
+index 5c6f39e7..5e7eee57 100644
+--- a/engines/basic/include/delta_engine.h
++++ b/engines/basic/include/delta_engine.h
+@@ -107,6 +107,8 @@ namespace dbasic {
+         bool ProcessMouseButtonDown(ysMouse::Button button);
+         bool ProcessMouseButtonUp(ysMouse::Button button);
+         bool IsMouseButtonDown(ysMouse::Button button);
++        bool PollMouseButtonEvent(ysMouse::ButtonEvent *event);
++        unsigned int GetInputResetSerial() const { return m_inputSystem->GetInputResetSerial(); }
+         int GetMouseWheel();
+         void GetMousePos(int *x, int *y);
+         void GetOsMousePos(int *x, int *y);
+diff --git a/engines/basic/src/delta_engine.cpp b/engines/basic/src/delta_engine.cpp
+index a916a162..9ec1007d 100644
+--- a/engines/basic/src/delta_engine.cpp
++++ b/engines/basic/src/delta_engine.cpp
+@@ -578,6 +578,15 @@ bool dbasic::DeltaEngine::IsMouseButtonDown(ysMouse::Button button) {
+     return false;
+ }
+ 
++bool dbasic::DeltaEngine::PollMouseButtonEvent(ysMouse::ButtonEvent *event) {
++    if (m_mainMouse == nullptr || !m_gameWindow->IsActive() ||
++        !m_mainMouse->PollButtonEvent(event)) return false;
++    m_gameWindow->ScreenToLocal(event->x, event->y);
++    event->x = static_cast<int>(std::round(event->x * m_gameWindow->GetGameResolutionScaleHorizontal()));
++    event->y = static_cast<int>(std::round(event->y * m_gameWindow->GetGameResolutionScaleVertical()));
++    return true;
++}
++
+ int dbasic::DeltaEngine::GetMouseWheel() {
+     if (m_mainMouse != nullptr) {
+         return m_mainMouse->GetWheel();
+@@ -599,14 +608,16 @@ void dbasic::DeltaEngine::GetMousePos(int *x, int *y) {
+ }
+ 
+ void dbasic::DeltaEngine::GetOsMousePos(int *x, int *y) {
+-    if (m_mainMouse != nullptr) {
+-        int os_x = m_mainMouse->GetOsPositionX();
+-        int os_y = m_mainMouse->GetOsPositionY();
+-
++    POINT cursor = {};
++    if (m_gameWindow != nullptr && GetCursorPos(&cursor)) {
++        int os_x = cursor.x, os_y = cursor.y;
+         m_gameWindow->ScreenToLocal(os_x, os_y);
+-
+-        if (x != nullptr) *x = os_x;
+-        if (y != nullptr) *y = os_y;
++        if (x != nullptr) *x = static_cast<int>(std::round(os_x * m_gameWindow->GetGameResolutionScaleHorizontal()));
++        if (y != nullptr) *y = static_cast<int>(std::round(os_y * m_gameWindow->GetGameResolutionScaleVertical()));
++    }
++    else {
++        if (x != nullptr) *x = 0;
++        if (y != nullptr) *y = 0;
+     }
+ }
+ 
+diff --git a/include/yds_input_system.h b/include/yds_input_system.h
+index 8e896f08..94659ab7 100644
+--- a/include/yds_input_system.h
++++ b/include/yds_input_system.h
+@@ -48,6 +48,8 @@ public:
+ 
+     bool IsGlobalInputEnabled() const { return m_enableGlobalInput; }
+     void SetGlobalInputEnabled(bool enabled) { m_enableGlobalInput = enabled; }
++    void ResetInputState();
++    unsigned int GetInputResetSerial() const { return m_inputResetSerial; }
+ 
+ protected:
+     // Create and register input devices. This function must be called
+@@ -80,6 +82,7 @@ protected:
+     ysWindowSystem *m_windowSystem;
+ 
+     bool m_enableGlobalInput;
++    unsigned int m_inputResetSerial = 0;
+ };
+ 
+ #endif /* YDS_INPUT_SYSTEM_H */
+diff --git a/include/yds_keyboard.h b/include/yds_keyboard.h
+index c5451e7b..491d3201 100644
+--- a/include/yds_keyboard.h
++++ b/include/yds_keyboard.h
+@@ -234,10 +234,13 @@ public:
+ 
+     const char *GetInputBuffer() const { return m_inputBuffer; }
+     void ClearInputBuffer();
++    void ClearKeyStates();
+ 
+ protected:
+     const ysKey::Code *m_keyMap;
+     ysKey *m_keys;
++    unsigned int m_pendingDown[256] = {};
++    unsigned int m_pendingUp[256] = {};
+ 
+     char m_inputBuffer[256];
+     int m_inputBufferOffset;
+diff --git a/include/yds_mouse.h b/include/yds_mouse.h
+index d7a943a9..5b72a1b2 100644
+--- a/include/yds_mouse.h
++++ b/include/yds_mouse.h
+@@ -1,6 +1,9 @@
+ #ifndef YDS_MOUSE_H
+ #define YDS_MOUSE_H
+ 
++#include <cstdint>
++#include <deque>
++
+ class ysMouse {
+ public:
+     enum class Button {
+@@ -25,15 +28,24 @@ public:
+         DownTransition
+     };
+ 
++    struct ButtonEvent {
++        Button button;
++        ButtonState state;
++        int x, y;
++        std::uint64_t sequence;
++    };
++
+ public:
+     ysMouse();
+     virtual ~ysMouse();
+ 
+     void Reset();
++    void ClearButtons();
+     void UpdatePosition(int x, int y, bool delta = true);
+     void UpdateWheel(int dwheel);
+     void UpdateButton(Button button, ButtonState state);
+     void SetOsPosition(int x, int y);
++    void QueueMoveEvent();
+ 
+     virtual int GetOsPositionX() const { return m_osPosition_x; }
+     virtual int GetOsPositionY() const { return m_osPosition_y; }
+@@ -44,6 +56,8 @@ public:
+     virtual bool IsDown(Button button) const;
+ 
+     virtual bool ProcessMouseButton(Button button, ButtonState state);
++    virtual bool PollButtonEvent(ButtonEvent *event);
++    const ButtonEvent *PeekButtonEvent() const;
+ 
+ protected:
+     int m_x;
+@@ -55,6 +69,7 @@ protected:
+ 
+ protected:
+     ButtonState m_buttonStates[(int)Button::Count];
++    std::deque<ButtonEvent> m_buttonEvents;
+ };
+ 
+ #endif /* YDS_MOUSE_H */
+diff --git a/include/yds_mouse_aggregator.h b/include/yds_mouse_aggregator.h
+index a9e0e43f..7c6c3561 100644
+--- a/include/yds_mouse_aggregator.h
++++ b/include/yds_mouse_aggregator.h
+@@ -24,6 +24,7 @@ public:
+     virtual bool IsDown(Button button) const;
+ 
+     virtual bool ProcessMouseButton(Button button, ButtonState state);
++    virtual bool PollButtonEvent(ButtonEvent *event);
+ 
+ protected:
+     ysExpandingArray<ysMouse *, 4> m_mice;
+diff --git a/include/yds_windows_input_system.h b/include/yds_windows_input_system.h
+index 579935b8..57a0788a 100644
+--- a/include/yds_windows_input_system.h
++++ b/include/yds_windows_input_system.h
+@@ -28,6 +28,8 @@ protected:
+ 
+     // Translate a windows device type to INPUT_DEVICE_TYPE
+     static ysInputDevice::InputDeviceType TranslateType(int type);
++    ysInputDevice *m_systemMouse = nullptr;
++    ysInputDevice *m_systemKeyboard = nullptr;
+ };
+ 
+ #endif /* YDS_WINDOWS_INPUT_SYSTEM_H */
+diff --git a/src/yds_input_system.cpp b/src/yds_input_system.cpp
+index ef937271..bbeafc98 100644
+--- a/src/yds_input_system.cpp
++++ b/src/yds_input_system.cpp
+@@ -53,6 +53,14 @@ ysError ysInputSystem::Initialize() {
+     return YDS_ERROR_RETURN(ysError::None);
+ }
+ 
++void ysInputSystem::ResetInputState() {
++    for (int i = 0; i < m_mouseAggregator.GetMouseCount(); ++i)
++        m_mouseAggregator.GetMouse(i)->ClearButtons();
++    for (int i = 0; i < m_keyboardAggregator.GetKeyboardCount(); ++i)
++        m_keyboardAggregator.GetKeyboard(i)->ClearKeyStates();
++    ++m_inputResetSerial;
++}
++
+ ysError ysInputSystem::AssignWindowSystem(ysWindowSystem *system) {
+     YDS_ERROR_DECLARE("AssignWindowSystem");
+ 
+diff --git a/src/yds_keyboard.cpp b/src/yds_keyboard.cpp
+index 295d600a..6706dec9 100644
+--- a/src/yds_keyboard.cpp
++++ b/src/yds_keyboard.cpp
+@@ -382,14 +382,19 @@ ysKeyboard::~ysKeyboard() {
+ }
+ 
+ bool ysKeyboard::ProcessKeyTransition(ysKey::Code key, ysKey::State state) {
+-    if (m_keys[(int)key].m_state == state) {
+-        if (state == ysKey::State::DownTransition) m_keys[(int)key].m_state = ysKey::State::Down;
+-        if (state == ysKey::State::UpTransition) m_keys[(int)key].m_state = ysKey::State::Up;
++    unsigned int &pending = state == ysKey::State::DownTransition
++        ? m_pendingDown[(int)key] : m_pendingUp[(int)key];
++    if (pending == 0) return false;
++    --pending;
++    return true;
++}
+ 
+-        return true;
++void ysKeyboard::ClearKeyStates() {
++    for (int i = 0; i < 256; ++i) {
++        m_keys[i].Reset();
++        m_pendingDown[i] = m_pendingUp[i] = 0;
+     }
+-
+-    else return false;
++    ClearInputBuffer();
+ }
+ 
+ void ysKeyboard::ClearInputBuffer() {
+@@ -398,6 +403,10 @@ void ysKeyboard::ClearInputBuffer() {
+ }
+ 
+ void ysKeyboard::SetKeyState(ysKey::Code key, ysKey::State state, ysKey::Variation conf) {
++    const bool down = state == ysKey::State::Down || state == ysKey::State::DownTransition;
++    if (down != m_keys[(int)key].IsDown()) {
++        ++(down ? m_pendingDown[(int)key] : m_pendingUp[(int)key]);
++    }
+     m_keys[(int)key].m_state = state;
+     m_keys[(int)key].m_configuration = conf;
+ 
+diff --git a/src/yds_keyboard_aggregator.cpp b/src/yds_keyboard_aggregator.cpp
+index ed66bbbf..4b07f01a 100644
+--- a/src/yds_keyboard_aggregator.cpp
++++ b/src/yds_keyboard_aggregator.cpp
+@@ -30,7 +30,7 @@ bool ysKeyboardAggregator::ProcessKeyTransition(ysKey::Code key, ysKey::State st
+ 
+     const int keyboardCount = GetKeyboardCount();
+     for (int i = 0; i < keyboardCount; ++i) {
+-        result = result || m_keyboards[i]->ProcessKeyTransition(key, state);
++        result = m_keyboards[i]->ProcessKeyTransition(key, state) || result;
+     }
+ 
+     return result;
+diff --git a/src/yds_mouse.cpp b/src/yds_mouse.cpp
+index ebbecbd9..195207b7 100644
+--- a/src/yds_mouse.cpp
++++ b/src/yds_mouse.cpp
+@@ -1,5 +1,12 @@
+ #include "../include/yds_mouse.h"
+ 
++namespace {
++    std::uint64_t nextInputSequence() {
++        static std::uint64_t sequence = 0;
++        return ++sequence;
++    }
++}
++
+ ysMouse::ysMouse() {
+     Reset();
+ }
+@@ -9,7 +16,7 @@ ysMouse::~ysMouse() {
+ }
+ 
+ void ysMouse::Reset() {
+-    for (int i = 0; i < (int)Button::Count; ++i) m_buttonStates[i] = ButtonState::Up;
++    ClearButtons();
+ 
+     m_x = 0;
+     m_y = 0;
+@@ -19,6 +26,11 @@ void ysMouse::Reset() {
+     m_osPosition_y = 0;
+ }
+ 
++void ysMouse::ClearButtons() {
++    for (int i = 0; i < (int)Button::Count; ++i) m_buttonStates[i] = ButtonState::Up;
++    m_buttonEvents.clear();
++}
++
+ void ysMouse::UpdatePosition(int x, int y, bool delta) {
+     if (delta) {
+         m_x += x;
+@@ -35,9 +47,33 @@ void ysMouse::UpdateWheel(int dwheel) {
+ }
+ 
+ void ysMouse::UpdateButton(Button button, ButtonState state) {
++    const bool down = state == ButtonState::Down || state == ButtonState::DownTransition;
++    if (down != IsDown(button)) {
++        // Input is dispatched on the window thread. Preserve quick clicks and
++        // ordering across devices even when several events arrive in one frame.
++        m_buttonEvents.push_back({button, down ? ButtonState::DownTransition : ButtonState::UpTransition,
++            m_osPosition_x, m_osPosition_y, nextInputSequence()});
++    }
+     m_buttonStates[(int)button] = state;
+ }
+ 
++void ysMouse::QueueMoveEvent() {
++    // Count is a position-only event; it cannot be mistaken for a real button.
++    m_buttonEvents.push_back({Button::Count, ButtonState::Up,
++        m_osPosition_x, m_osPosition_y, nextInputSequence()});
++}
++
++const ysMouse::ButtonEvent *ysMouse::PeekButtonEvent() const {
++    return m_buttonEvents.empty() ? nullptr : &m_buttonEvents.front();
++}
++
++bool ysMouse::PollButtonEvent(ButtonEvent *event) {
++    if (event == nullptr || m_buttonEvents.empty()) return false;
++    *event = m_buttonEvents.front();
++    m_buttonEvents.pop_front();
++    return true;
++}
++
+ void ysMouse::SetOsPosition(int x, int y) {
+     m_osPosition_x = x;
+     m_osPosition_y = y;
+@@ -50,12 +86,11 @@ bool ysMouse::IsDown(Button button) const {
+ }
+ 
+ bool ysMouse::ProcessMouseButton(Button button, ButtonState state) {
+-    ButtonState &currentState = m_buttonStates[(int)button];
+-
+-    if (currentState != state) return false;
+-
+-    if (currentState == ButtonState::UpTransition) currentState = ButtonState::Up;
+-    if (currentState == ButtonState::DownTransition) currentState = ButtonState::Down;
+-
+-    return true;
++    for (auto event = m_buttonEvents.begin(); event != m_buttonEvents.end(); ++event) {
++        if (event->button == button && event->state == state) {
++            m_buttonEvents.erase(event);
++            return true;
++        }
++    }
++    return false;
+ }
+diff --git a/src/yds_mouse_aggregator.cpp b/src/yds_mouse_aggregator.cpp
+index b830de73..d5c25a8e 100644
+--- a/src/yds_mouse_aggregator.cpp
++++ b/src/yds_mouse_aggregator.cpp
+@@ -17,15 +17,11 @@ void ysMouseAggregator::DeleteMouse(ysMouse *mouse) {
+ }
+ 
+ int ysMouseAggregator::GetOsPositionX() const {
+-    if (m_mice.GetNumObjects() == 0) return 0;
+-
+-    return m_mice[0]->GetOsPositionX();
++    return m_osPosition_x;
+ }
+ 
+ int ysMouseAggregator::GetOsPositionY() const {
+-    if (m_mice.GetNumObjects() == 0) return 0;
+-
+-    return m_mice[0]->GetOsPositionY();
++    return m_osPosition_y;
+ }
+ 
+ int ysMouseAggregator::GetX() const {
+@@ -72,8 +68,18 @@ bool ysMouseAggregator::ProcessMouseButton(Button button, ButtonState state) {
+ 
+     const int mouseCount = m_mice.GetNumObjects();
+     for (int i = 0; i < mouseCount; ++i) {
+-        result = result || m_mice[i]->ProcessMouseButton(button, state);
++        result = m_mice[i]->ProcessMouseButton(button, state) || result;
+     }
+ 
+     return result;
+ }
++
++bool ysMouseAggregator::PollButtonEvent(ButtonEvent *event) {
++    ysMouse *next = nullptr;
++    for (int i = 0; i < m_mice.GetNumObjects(); ++i) {
++        const ButtonEvent *candidate = m_mice[i]->PeekButtonEvent();
++        if (candidate != nullptr && (next == nullptr ||
++            candidate->sequence < next->PeekButtonEvent()->sequence)) next = m_mice[i];
++    }
++    return next != nullptr && next->PollButtonEvent(event);
++}
+diff --git a/src/yds_windows_input_system.cpp b/src/yds_windows_input_system.cpp
+index 66e0328f..3c921a27 100644
+--- a/src/yds_windows_input_system.cpp
++++ b/src/yds_windows_input_system.cpp
+@@ -228,10 +228,11 @@ ysWindowsInputDevice *ysWindowsInputSystem::AddDevice(RAWINPUT *rawInput) {
+ }
+ 
+ int ysWindowsInputSystem::ProcessInputMessage(HRAWINPUT lparam) {
+-    UINT dwSize;
++    UINT dwSize = 0;
+     LPBYTE lpb;
+ 
+-    GetRawInputData(lparam, RID_INPUT, NULL, &dwSize, sizeof(RAWINPUTHEADER));
++    if (GetRawInputData(lparam, RID_INPUT, NULL, &dwSize, sizeof(RAWINPUTHEADER)) == UINT(-1)
++        || dwSize < sizeof(RAWINPUTHEADER)) return 0;
+ 
+     lpb = new BYTE[dwSize];
+     if (lpb == nullptr) return 0;
+@@ -252,11 +253,25 @@ int ysWindowsInputSystem::ProcessInputMessage(HRAWINPUT lparam) {
+             device = AddDevice(raw);
+         }
+     }
++    else if (raw->header.dwType == RIM_TYPEMOUSE || raw->header.dwType == RIM_TYPEKEYBOARD) {
++        // Precision touchpads and accessibility/injected input can legitimately
++        // have no physical device handle. Keep them in a dedicated system slot.
++        ysInputDevice *&systemDevice = raw->header.dwType == RIM_TYPEMOUSE
++            ? m_systemMouse : m_systemKeyboard;
++        if (systemDevice == nullptr) {
++            systemDevice = CreateDevice(TranslateType(raw->header.dwType), -1);
++            systemDevice->SetGeneric(false);
++            systemDevice->SetConnected(true);
++        }
++        device = systemDevice;
++    }
+ 
+     if (device != nullptr) {
+         if (raw->header.dwType == RIM_TYPEKEYBOARD) {
+             ysKeyboard *keyboard = device->GetAsKeyboard();
++            if (raw->data.keyboard.VKey >= 256) { delete[] lpb; return 0; }
+             ysKey::Code index = keyboard->GetKeyMap(raw->data.keyboard.VKey);
++            if (index == ysKey::Code::Undefined) { delete[] lpb; return 0; }
+             const ysKey *key = keyboard->GetKey(index);
+ 
+             ysKey::Variation newConf = key->m_configuration;
+@@ -276,10 +291,13 @@ int ysWindowsInputSystem::ProcessInputMessage(HRAWINPUT lparam) {
+             bool delta = true;
+             if (raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) delta = false;
+ 
+-            POINT p;
+-            if (GetCursorPos(&p)) {
+-                mouse->SetOsPosition(p.x, p.y);
+-            }
++            const DWORD position = GetMessagePos();
++            const int x = static_cast<short>(LOWORD(position));
++            const int y = static_cast<short>(HIWORD(position));
++            mouse->SetOsPosition(x, y);
++            m_mouseAggregator.SetOsPosition(x, y);
++            if (raw->data.mouse.lLastX != 0 || raw->data.mouse.lLastY != 0 || !delta)
++                mouse->QueueMoveEvent();
+ 
+             mouse->UpdatePosition(raw->data.mouse.lLastX, raw->data.mouse.lLastY, delta);
+ 
+@@ -294,15 +312,7 @@ int ysWindowsInputSystem::ProcessInputMessage(HRAWINPUT lparam) {
+             if (raw->data.mouse.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) mouse->UpdateButton(ysMouse::Button::Middle, ysMouse::ButtonState::DownTransition);
+             if (raw->data.mouse.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP) mouse->UpdateButton(ysMouse::Button::Middle, ysMouse::ButtonState::UpTransition);
+ 
+-            if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_1_DOWN) mouse->UpdateButton(ysMouse::Button::Aux_1, ysMouse::ButtonState::DownTransition);
+-            if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_1_UP) mouse->UpdateButton(ysMouse::Button::Aux_1, ysMouse::ButtonState::UpTransition);
+-
+-            if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_2_DOWN) mouse->UpdateButton(ysMouse::Button::Aux_2, ysMouse::ButtonState::DownTransition);
+-            if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_2_UP) mouse->UpdateButton(ysMouse::Button::Aux_2, ysMouse::ButtonState::UpTransition);
+-
+-            if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_3_DOWN) mouse->UpdateButton(ysMouse::Button::Aux_3, ysMouse::ButtonState::DownTransition);
+-            if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_3_UP) mouse->UpdateButton(ysMouse::Button::Aux_3, ysMouse::ButtonState::UpTransition);
+-
++            // BUTTON_1/2/3 are aliases of left/right/middle, not extra buttons.
+             if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_4_DOWN) mouse->UpdateButton(ysMouse::Button::Aux_4, ysMouse::ButtonState::DownTransition);
+             if (raw->data.mouse.usButtonFlags & RI_MOUSE_BUTTON_4_UP) mouse->UpdateButton(ysMouse::Button::Aux_4, ysMouse::ButtonState::UpTransition);
+ 
+diff --git a/src/yds_windows_window_system.cpp b/src/yds_windows_window_system.cpp
+index 941522c1..2419dd98 100644
+--- a/src/yds_windows_window_system.cpp
++++ b/src/yds_windows_window_system.cpp
+@@ -144,6 +144,17 @@ LRESULT WINAPI ysWindowsWindowSystem::WinProc(HWND hWnd, UINT msg, WPARAM wParam
+             return 0;
+         case WM_KILLFOCUS:
+             target->OnDeactivate();
++            if (inputSystem != nullptr) inputSystem->ResetInputState();
++            if (GetCapture() == hWnd) ReleaseCapture();
++            return 0;
++        case WM_CAPTURECHANGED:
++        case WM_CANCELMODE:
++            if (inputSystem != nullptr) {
++                ysMouseAggregator *mouse = inputSystem->GetMouseAggregator();
++                // Releasing capture after a normal up must keep the queued up.
++                if (mouse->IsDown(ysMouse::Button::Left) || mouse->IsDown(ysMouse::Button::Right) ||
++                    mouse->IsDown(ysMouse::Button::Middle)) inputSystem->ResetInputState();
++            }
+             return 0;
+         case WM_KEYDOWN:
+             target->OnKeyDown(wParam);
+@@ -151,7 +162,14 @@ LRESULT WINAPI ysWindowsWindowSystem::WinProc(HWND hWnd, UINT msg, WPARAM wParam
+         case WM_INPUT:
+             if (inputSystem != nullptr) {
+                 if (inputSystem->IsGlobalInputEnabled() || target->IsActive()) {
+-                    return inputSystem->ProcessInputMessage((HRAWINPUT)lParam);
++                    inputSystem->ProcessInputMessage((HRAWINPUT)lParam);
++                    ysMouseAggregator *mouse = inputSystem->GetMouseAggregator();
++                    const bool held = mouse->IsDown(ysMouse::Button::Left) ||
++                        mouse->IsDown(ysMouse::Button::Right) || mouse->IsDown(ysMouse::Button::Middle);
++                    if (held && target->IsActive() && GetCapture() != hWnd) SetCapture(hWnd);
++                    else if (!held && GetCapture() == hWnd) ReleaseCapture();
++                    // DefWindowProc performs the required raw-input cleanup.
++                    return DefWindowProc(hWnd, msg, wParam, lParam);
+                 }
+                 else return 0;
+             }
