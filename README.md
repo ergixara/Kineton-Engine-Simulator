@@ -52,9 +52,3 @@
 |Sabata |Brady Fulham|Powerpuncher |NK10K|Gavin Osowski|
 |Orbitstrider|Steven Doyle|Jaksu2696|Toni |Devin Abolins|
 
-|Conejero00|Bill Gricko|A cow wearing a turban|Danni Nowicki|Udo Schmidt|
-|Tyler Swords|Constellation Gaming|Manimo|valentine|Jules Schattenberg|
-|Brandon Crotts|Philipp Popetschnigg|Tiziano Della Fazia|goodgamer1109|Joshua Thomas|
-|Jeff Testa|Avery Snyder|Josh Kern|Triptagram|Bayon Antoine|
-|Iván Juárez Núñez|Amery Martinat|ElArGee|Cory Green|lucas Di lorenzo|
-|Caleb Sandersier|||||
